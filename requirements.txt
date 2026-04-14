@@ -1,0 +1,13 @@
+ipykernel==6.31.0
+numpy
+pandas
+yfinance
+matplotlib
+seaborn
+filterpy
+streamlit
+folium
+streamlit-folium
+pydeck
+aiohttp
+aiofile
