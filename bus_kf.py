@@ -281,7 +281,7 @@ st.divider()
 # 3. History Section
 st.header("A Brief History: From the Moon to Vilnius")
 st.markdown(r"""
-The Kalman Filter is named after **Rudolf E. Kálmán**, who published his seminal paper in 1960. While it tracks buses in Vilnius today, its most famous early application was the **Apollo Program**.
+The Kalman Filter is named after **Rudolf E. Kálmán**, who published his seminal paper in 1960. Its most famous early application was the **Apollo Program**.
 
 NASA engineers used this recursive algorithm to solve the navigation problem for the moon landing. The onboard computers had limited memory and processed noisy sensor data from the inertial guidance system. The Kalman Filter allowed the **Apollo 11 Guidance Computer** to provide smooth, accurate estimates of the Lunar Module's position and velocity in real-time. Without this algorithm, landing on the lunar surface with such precision would have been significantly more difficult.
 """)
@@ -294,7 +294,7 @@ st.header("The Mathematics of the State")
 st.subheader("1. The State Vector")
 st.markdown(r"""
 We track the bus using a four-dimensional state vector $x$, representing 2D position and 2D velocity:
-$$x = \begin{bmatrix} \text{longitude} \\ \text{latitude} \\ v_{lon} \\ v_{lat} \end{bmatrix}$$
+$$x = \begin{bmatrix} x_{lon} \\ x_{lat} \\ v_{lon} \\ v_{lat} \end{bmatrix}$$
 """)
 
 st.subheader("2. Prediction (Extrapolation)")
@@ -320,7 +320,7 @@ st.divider()
 # 5. Tuning and Parameters
 st.header("Tuning the Filter: Hardcoded Parameters")
 st.markdown(r"""
-A Kalman Filter is a "tug-of-war" between your **mathematical model** and your **sensor measurements**.
+A Kalman Filter is a "tug-of-war" between the **mathematical model** and the **sensor measurements**.
 
 ### Measurement Matrix ($H$)
 Since we only "see" longitude and latitude from the GPS, but track four variables, $H$ filters out the velocity components:
