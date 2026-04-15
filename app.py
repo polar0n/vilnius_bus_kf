@@ -297,7 +297,6 @@ st.markdown("""
         font-family: 'Cascadia Code', sans-serif;
         font-size: 14px;
         font-weight: 500;
-        color: #091747;
     }
     </style>
 """, unsafe_allow_html=True)
