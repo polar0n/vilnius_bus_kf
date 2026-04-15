@@ -2,7 +2,7 @@ import numpy as np
 import streamlit as st
 import pandas as pd
 import pydeck as pdk
-from filterpy.kalman import KalmanFilter
+from filterpy.kalman import KalmanFilter, IMMEstimator
 
 
 ICON_SVG = "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIxMDAiIGhlaWdodD0iMTAwIiB2aWV3Qm94PSIwIDAgMTAwIDEwMCI+PHBvbHlnb24gcG9pbnRzPSI1MCwwIDk1LDk1IDUwLDcwIDUsOTUgNTAsMCIgZmlsbD0icmVkIiBzdHJva2U9IndoaXRlIiBzdHJva2Utd2lkdGg9IjIiLz48L3N2Zz4="
@@ -28,40 +28,82 @@ def get_live_buses():
         return pd.DataFrame()
 
 
-def init_kf(x_init):
-    kf = KalmanFilter(dim_x=4, dim_z=2)
-    dt = 10.0 # seconds between pings
+def init_imm(x_init):
+    # Measurement Noise
+    R = np.eye(2) * 1e-8
+
+    # Transition Probability Matrix
+    # Row 0: Stationary, Row 1: CV, Row 2: CA
+    # Most of the probability is on the diagonal (staying in current mode)
+    M = np.array([[0.94, 0.01, 0.01],  # If stopped, 95% stay stopped, 5% start moving
+                  [0.05, 0.85, 0.10],  # If cruising, 90% stay cruising, 5% stop/brake
+                  [0.1, 0.10, 0.80]]) # If maneuvering, 90% stay maneuvering, 10% cruise
+
+    # Model 1: Stationary
+    kf1 = KalmanFilter(dim_x=6, dim_z=2)
+    # F is Identity: position, velocity, and accel don't change
+    kf1.F = np.eye(6)
+    kf1.H = np.array([[1, 0, 0, 0, 0, 0],
+                    [0, 1, 0, 0, 0, 0]])
+    kf1.R = R.copy()
+    # Q is extremely low: we don't expect the "stationary" state to drift
+    kf1.Q = np.eye(6) * 1e-14
+
+    # Model 2: Constant Velocity (CV)
+    kf2 = KalmanFilter(dim_x=6, dim_z=2)
+    dt = 10.0
     # State Transition Matrix (Physics: pos = pos + v*dt)
-    kf.F = np.array([[1, 0, dt, 0],
-                     [0, 1, 0, dt],
-                     [0, 0, 1,  0],
-                     [0, 0, 0,  1]])
-    # Measurement Matrix (We only observe Lat/Lon, not velocity)
-    kf.H = np.array([[1, 0, 0, 0],
-                     [0, 1, 0, 0]])
-    kf.P *= .1 # Initial uncertainty
-    kf.R = np.eye(2) * 1e-8 # Measurement noise (GPS jitter)
-    kf.Q = np.eye(4) * 1e-9  # Process noise (Bus acceleration/braking)
-    kf.x = x_init
-    return kf
+    kf2.F = np.array([[1, 0, dt, 0, 0, 0],
+                    [0, 1, 0, dt, 0, 0],
+                    [0, 0, 1,  0, 0, 0],
+                    [0, 0, 0,  1, 0, 0],
+                    [0, 0, 0,  0, 1, 0], # Accel stays 0
+                    [0, 0, 0,  0, 0, 1]])
+    kf2.H = np.array([[1, 0, 0, 0, 0, 0],
+                    [0, 1, 0, 0, 0, 0]])
+    kf2.P *= .1 # Initial uncertainty
+    kf2.R = R.copy() # Measurement noise (GPS jitter)
+    kf2.Q = np.eye(6) * 1e-10  # Process noise (Bus acceleration/braking)
+
+    # Model 3: Constant Acceleration (CA)
+    kf3 = KalmanFilter(dim_x=6, dim_z=2)
+    dt2 = 0.5 * (dt**2)
+    kf3.F = np.array([[1, 0, dt, 0, dt2, 0],   # p = p + vt + 0.5at^2
+                      [0, 1, 0, dt, 0, dt2],
+                      [0, 0, 1, 0, dt, 0],     # v = v + at
+                      [0, 0, 0, 1, 0, dt],
+                      [0, 0, 0, 0, 1, 0],      # a = a
+                      [0, 0, 0, 0, 0, 1]])
+    kf3.H = np.array([[1, 0, 0, 0, 0, 0],
+                    [0, 1, 0, 0, 0, 0]])
+    kf3.R = R.copy()
+    # Q is high: allows the filter to rapidly adjust acceleration
+    # to "match" the braking or speeding up of the bus.
+    kf3.Q = np.eye(6) * 1e-8
+
+    imm = IMMEstimator([kf1, kf2, kf3], np.ones(3)/3, M)
+    imm.x = x_init
+    return imm
 
 
 def get_x(bus_data: dict) -> np.array:
     angle = np.radians(bus_data["angle"])
     speed = bus_data["speed"] / (3600.0 * 111320.0)
-    return [
+    return np.array([
         [bus_data["lon"]],
         [bus_data["lat"]],
         [np.sin(angle) * speed],
         [np.cos(angle) * speed],
-    ]
+        [0.0],
+        [0.0],
+    ])
 
 
 def get_z(bus_data: dict) -> np.array:
-    return [
+    return np.array([
         [bus_data["lon"]],
         [bus_data["lat"]],
-    ]
+    ])
 
 
 st.title("Live Kalman Filter Vilnius Bus Tracker")
@@ -73,8 +115,8 @@ sidebar_errors = st.sidebar.container()
 
 if "map_view" not in st.session_state:
     st.session_state.map_view = pdk.ViewState(latitude=54.6872, longitude=25.2797, zoom=12)
-if "kalman" not in st.session_state:
-    st.session_state.kalman = None
+if "imm" not in st.session_state:
+    st.session_state.imm = None
 if "tracking" not in st.session_state:
     st.session_state.tracking = False
 if "last_prediction" not in st.session_state:
@@ -100,7 +142,7 @@ def bus_map_fragment(selected_id, metric_container, error_container):
         st.session_state.current_target = selected_id
         st.session_state.error_history = []
         st.session_state.tracking = False
-        st.session_state.kalman = None
+        st.session_state.imm = None
         st.session_state.last_prediction = None
 
     if selected_id:
@@ -112,8 +154,8 @@ def bus_map_fragment(selected_id, metric_container, error_container):
             bus = display_df.iloc[0].to_dict()
             if not st.session_state.tracking:
                 st.session_state.tracking = True
-                st.session_state.kalman = init_kf(get_x(bus))
-                st.session_state.kalman.predict()
+                st.session_state.imm = init_imm(get_x(bus))
+                st.session_state.imm.predict()
             else:
                 # Calculate Error using the last prediction and current GPS
                 if st.session_state.last_prediction:
@@ -136,26 +178,26 @@ def bus_map_fragment(selected_id, metric_container, error_container):
                             label = "Latest" if i == 0 else f"T -{i*10}s"
                             st.metric(label, f"{err:.2f} m")
 
-                var_x = st.session_state.kalman.P[0, 0]
-                var_y = st.session_state.kalman.P[1, 1]
+                var_x = st.session_state.imm.P[0, 0]
+                var_y = st.session_state.imm.P[1, 1]
                 std_dev_meters = np.sqrt(max(var_x, var_y)) * 111320
 
-                curr_lon = float(st.session_state.kalman.x[0][0])
-                curr_lat = float(st.session_state.kalman.x[1][0])
+                curr_lon = float(st.session_state.imm.x[0][0])
+                curr_lat = float(st.session_state.imm.x[1][0])
 
                 st.session_state.last_prediction = (
                     curr_lon, curr_lat, std_dev_meters
                 )
 
-                st.session_state.kalman.update(get_z(bus))
-                st.session_state.kalman.predict()
+                st.session_state.imm.update(get_z(bus))
+                st.session_state.imm.predict()
 
             # Prediction visualization layers
-            var_x = st.session_state.kalman.P[0, 0]
-            var_y = st.session_state.kalman.P[1, 1]
+            var_x = st.session_state.imm.P[0, 0]
+            var_y = st.session_state.imm.P[1, 1]
             std_dev_meters = np.sqrt(max(var_x, var_y)) * 111320
-            curr_lon = float(st.session_state.kalman.x[0][0])
-            curr_lat = float(st.session_state.kalman.x[1][0])
+            curr_lon = float(st.session_state.imm.x[0][0])
+            curr_lat = float(st.session_state.imm.x[1][0])
             curr_pred_df = pd.DataFrame([{"lon": curr_lon, "lat": curr_lat, "std": std_dev_meters}])
 
             layers.append(pdk.Layer(
@@ -247,92 +289,120 @@ def bus_map_fragment(selected_id, metric_container, error_container):
 
 bus_map_fragment(target_bus_id, sidebar_metrics, sidebar_errors)
 
-# --- APPEND TO THE END OF YOUR SCRIPT ---
+st.markdown("""
+    <style>
+    @import url('https://fonts.googleapis.com/css2?family=Cascadia+Code:ital,wght@0,200..700;1,200..700&display=swap');
+
+    html, body, [class*="css"] {
+        font-family: 'Cascadia Code', sans-serif;
+        font-size: 18px;
+        font-weight: 500;
+        color: #091747;
+    }
+    </style>
+""", unsafe_allow_html=True)
 
 st.divider()
 
 # 1. Operation Instructions
-st.header("Instructions")
+st.header("Operation Instructions")
 st.markdown(r"""
-To begin tracking a specific vehicle with the Kalman Filter:
-1. **Locate a Target:** Hover your cursor over any red bus icon on the map to reveal its unique **Bus ID** in the tooltip.
-2. **Input ID:** Type the numerical ID into the sidebar text field.
-3. **Wait for Initialization:** The map will clear all other vehicles. Please wait **10–20 seconds** for the filter to collect its first two pings and begin projecting the trajectory.
+To begin tracking a specific bus:
+1. **Locate a Target:** Hover the cursor over any bus to find its **Bus ID**.
+2. **Input ID:** Insert the ID into the sidebar.
+3. **Wait for Convergence:** Because the IMM tracks position, velocity, and acceleration across three models, it may take **1 minute** for the filters to accurately understand the current movement of the bus.
 """)
 
 st.divider()
 
-# 2. Visual Legend
+# 2. Visual Legend and Methodology
 st.header("Visual Legend and Methodology")
 st.markdown("""
-The tracking system uses a recursive mathematical algorithm to estimate the "true" state of a bus, accounting for GPS noise and transmission delays.
+This system uses an **IMM Estimator**, which runs three specialized Kalman Filters simultaneously to handle different movement behaviors.
 """)
 
 legend_df = pd.DataFrame([
     {"Element": "Current Position", "Visual": "Red Arrow", "Meaning": "Raw GPS telemetry", "Basis": "Direct stream from stops.lt"},
-    {"Element": "Prediction", "Visual": "Green Circle", "Meaning": "Expected position in 10s", "Basis": "Extrapolated via State Transition Matrix ($F$)"},
+    {"Element": "Prediction", "Visual": "Green Circle", "Meaning": "Weighted trajectory projection", "Basis": "Blended output of Stationary, CV, and CA models"},
     {"Element": "Previous Target", "Visual": "Yellow Circle", "Meaning": "Last step's prediction", "Basis": "Retained from $x_{t-1}$"},
-    {"Element": "Uncertainty", "Visual": "Circular Radius", "Meaning": "1-Std Confidence Interval", "Basis": "Diagonal elements of Covariance Matrix ($P$)"}
+    {"Element": "Uncertainty", "Visual": "Circular Radius", "Meaning": "Confidence Interval ($1\\sigma$)", "Basis": "Weighted Covariance ($P$) of all active models"}
 ])
 st.table(legend_df)
 
 st.divider()
 
-# 3. History Section
-st.header("A Brief History: From the Moon to Vilnius")
+# 3. History Section: From the Moon to the Streets
+st.header("A Brief History: Why One Filter Isn't Enough")
+st.image("aoc.webp")
 st.markdown(r"""
 The Kalman Filter is named after **Rudolf E. Kálmán**, who published his seminal paper in 1960. Its most famous early application was the **Apollo Program**.
 
 NASA engineers used this recursive algorithm to solve the navigation problem for the moon landing. The onboard computers had limited memory and processed noisy sensor data from the inertial guidance system. The Kalman Filter allowed the **Apollo 11 Guidance Computer** to provide smooth, accurate estimates of the Lunar Module's position and velocity in real-time. Without this algorithm, landing on the lunar surface with such precision would have been significantly more difficult.
+
+In the vacuum of space, objects move with predictable physics. However, driving in a city is more unpredictable, it breaks at stops, accelerates on highways, turns on roundabouts.
+
+A single filter is always a compromise: tuning it for smooth predictions during movement, leads to lags during stops; tuning it for responsiveness leads to jumpiness when the vehicle is not moving. The **IMM approach** solves this by running three filters for each movement mode of a vehicle at once using probability to decide which one describes the bus at this exact moment. One filter for when the vehicle is stationary, one when it is moving at a constant speed, and one when it has a constant acceleration (whether positive or negative).
 """)
 
 st.divider()
 
-# 4. Mathematical Foundation
-st.header("The Mathematics of the State")
+# 4. IMM Architecture
+st.header("The Mathematics of the IMM")
 
-st.subheader("1. The State Vector")
+st.subheader("1. The 6D State Vector")
 st.markdown(r"""
-We track the bus using a four-dimensional state vector $x$, representing 2D position and 2D velocity:
-$$x = \begin{bmatrix} x_{lon} \\ x_{lat} \\ v_{lon} \\ v_{lat} \end{bmatrix}$$
+To account for complex maneuvers, the state vector $x$ has **six dimensions**, which tracks position, velocity, and acceleration for both longitude and latitude:
+
+$$x = \begin{bmatrix} lon \\ lat \\ v_{lon} \\ v_{lat} \\ a_{lon} \\ a_{lat} \end{bmatrix}$$
 """)
 
-st.subheader("2. Prediction (Extrapolation)")
+st.subheader("2. The Three-Model Hypothesis")
 st.markdown(r"""
-The filter predicts the next state using the transition matrix $F$, which assumes constant velocity over the time interval $\Delta t = 10s$:
+The IMM maintains three separate filters, each representing a different "Mode of Flight":
 
-$$x_{k|k-1} = F x_{k-1|k-1}$$
-
-Where $F$ is defined in your code as:
-$$F = \begin{bmatrix} 1 & 0 & 10 & 0 \\ 0 & 1 & 0 & 10 \\ 0 & 0 & 1 & 0 \\ 0 & 0 & 0 & 1 \end{bmatrix}$$
+1. **Stationary Model ($F=I$):** Assumes the bus is at a stop. $Q$ is extremely low ($10^{-14}$) to lock the position and prevent the prediction from "drifting" due to minor GPS noise.
+	* This low $Q$ can be noticed on the map while tracking as the small/precise circle when the bus is not moving.
+2. **Constant Velocity (CV):** Assumes the bus is "cruising" (moving at a constant speed). It accounts for velocity but assumes acceleration is zero.
+3. **Constant Acceleration (CA):** Assumes the bus is actively changing speed. $Q$ is high ($10^{-8}$) to allow the filter to rapidly adjust the acceleration $a$ to match the bus's physical behavior.
 """)
 
-st.subheader("3. Covariance and Uncertainty")
+st.subheader("3. Transition Probability Matrix ($M$)")
 st.markdown(r"""
-The "size" of the circles on the map is determined by the covariance matrix $P$. This tracks the uncertainty in our estimate:
-$$P_{k|k-1} = F P_{k-1|k-1} F^T + Q$$
+The "Interaction" in IMM comes from the matrix $M$, which defines the probability of the bus switching modes between 10-second pings:
 
-Here, $Q$ is the **Process Noise** (`1e-9`), representing the physical reality that buses can accelerate or brake unexpectedly between GPS pings.
+$$M = \begin{bmatrix} 0.94 & 0.01 & 0.01 \\ 0.05 & 0.85 & 0.10 \\ 0.10 & 0.10 & 0.80 \end{bmatrix}$$
+
+* **Diagonal Elements (0.94, 0.85, 0.80):** These represent the high probability that a bus stays in its current movement mode.
+* **Off-Diagonal Elements:** These represent the probability of switching. For example, there is a $10\%$ probability that a bus moving at a constant speed (CV) will suddenly begin accelerating or decelerating (CA).
 """)
 
 st.divider()
 
-# 5. Tuning and Parameters
-st.header("Tuning the Filter: Hardcoded Parameters")
+# 5. Why Uncertainty Grows During Maneuvers
+st.header("Why the $1\\sigma$ Circle Expands")
 st.markdown(r"""
-A Kalman Filter is a "tug-of-war" between the **mathematical model** and the **sensor measurements**.
+You will notice the green circle **growing significantly** when the bus brakes for a light or speeds up. This is a critical feature of the IMM logic.
 
-### Measurement Matrix ($H$)
-Since we only "see" longitude and latitude from the GPS, but track four variables, $H$ filters out the velocity components:
-$$H = \begin{bmatrix} 1 & 0 & 0 & 0 \\ 0 & 1 & 0 & 0 \end{bmatrix}$$
+### Maneuver Detection
+During acceleration or deceleration (known as a maneuvers), the bus's movements no longer match the **Stationary** or **CV** models which gets detected by the IMM and it shifts its "Model Probability" (weight) toward the **Constant Acceleration (CA)** model.
 
+Because the CA model has a much higher **Process Noise ($Q$)**, the blended Covariance Matrix ($P$) expands. Visually, the circle grows because the filter is admitting: *"The bus is changing its behavior, so I am temporarily less certain about exactly where it will be in 10 seconds."* Once the bus settles back into a constant speed, the CV model regains weight, and the circle shrinks again.
+""")
+
+st.divider()
+
+# 6. Tuning the Parameters
+st.header("Hardcoded Parameters and Blending")
+st.markdown(r"""
 ### Measurement Noise ($R$)
-**Variable:** `kf.R = np.eye(2) * 1e-8`
-This represents **GPS Jitter**. A small value like $10^{-8}$ tells the filter that our GPS is very accurate. If this were larger, the filter would ignore sudden jumps in the data, assuming they were just noise.
+**Variable:** `1e-8`
+This reflects the precision of the Vilnius Bus Live GPS feed. We treat this as constant across all models.
 
-### The Update Step
-Every 10 seconds, the filter performs a weighted average using the **Kalman Gain ($K$)**:
-$$\text{New Estimate} = \text{Prediction} + K \times (\text{Measurement} - \text{Prediction})$$
+### Blended Prediction
+The final position seen on the map is a **weighted sum** of all positions predicted by the filters:
 
-If the GPS is noisy ($R$ is large), $K$ becomes small, and the filter trusts the **Prediction** more. If the bus moves unexpectedly ($Q$ is large), $K$ becomes large, and the filter trusts the **Measurement** more.
+
+$$\hat{x}_{IMM} = \sum_{i=1}^{3} \mu_i \hat{x}_i$$
+
+Where $\mu_i$ is the probability that model $i$ is the correct description of the bus's current state.
 """)
