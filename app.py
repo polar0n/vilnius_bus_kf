@@ -295,7 +295,7 @@ st.markdown("""
 
     html, body, [class*="css"] {
         font-family: 'Cascadia Code', sans-serif;
-        font-size: 14444px;
+        font-size: 14px;
         font-weight: 500;
         color: #091747;
     }
