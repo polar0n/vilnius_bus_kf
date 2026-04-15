@@ -295,7 +295,7 @@ st.markdown("""
 
     html, body, [class*="css"] {
         font-family: 'Cascadia Code', sans-serif;
-        font-size: 18px;
+        font-size: 14444px;
         font-weight: 500;
         color: #091747;
     }
@@ -395,7 +395,7 @@ st.divider()
 st.header("Hardcoded Parameters and Blending")
 st.markdown(r"""
 ### Measurement Noise ($R$)
-**Variable:** `1e-8`
+**Variable:** $1e-8$
 This reflects the precision of the Vilnius Bus Live GPS feed. We treat this as constant across all models.
 
 ### Blended Prediction
